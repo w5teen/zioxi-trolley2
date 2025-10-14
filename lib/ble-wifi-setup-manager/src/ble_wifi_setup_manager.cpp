@@ -35,6 +35,7 @@
  ********************************************************************************************************************************************/
 
 #include "ble_wifi_setup_manager.h"
+#include "EthernetWiFi.h"
 
 Logger BLEWiFiSetupManagerLogger("app.BLEWiFiSetupManager");
 
@@ -189,7 +190,8 @@ void BLEWiFiSetupManager::parse_message()
 
     // Process our received message
     JSONObjectIterator iter(outerObj);
-    while(iter.next()) {
+    while(iter.next())
+    {
         BLEWiFiSetupManagerLogger.info("key=%s value=%s", 
             (const char *) iter.name(), 
             (const char *) iter.value().toString());
@@ -320,6 +322,36 @@ void BLEWiFiSetupManager::parse_message()
                     BLEWiFiSetupManagerLogger.info("No WiFi Credentials");
                     status_message("No WiFi Credentials");
                 }
+            }
+            // Get the operation mode [Local or Connected]
+            else if (strcmp((const char *)iter.value().toString(), "get_mode") == 0)
+            {
+                int activenetwork = EthernetWiFi::instance().getActiveInterface();
+
+                if (activenetwork == (int) EthernetWiFi::ActiveInterface::OFF)
+                {
+                    BLEWiFiSetupManagerLogger.info("Local mode");
+                    status_message("Local mode operation");
+                }
+                else
+                {
+                    BLEWiFiSetupManagerLogger.info("Connected mode");
+                    status_message("Connected mode operation");
+                }
+            }
+            // Set operation mode Local
+            else if (strcmp((const char *)iter.value().toString(), "set_mode_local") == 0)
+            {
+                BLEWiFiSetupManagerLogger.info("Set operation mode: Local");
+                EthernetWiFi::instance().setAutomaticInterface(false);
+                status_message("Operation mode Local");
+            }
+            // Set operation mode Connected
+            else if (strcmp((const char *)iter.value().toString(), "set_mode_conn") == 0)
+            {
+                BLEWiFiSetupManagerLogger.info("Set operation mode: Connected");
+                EthernetWiFi::instance().setAutomaticInterface(true);
+                status_message("Operation mode Connected");
             }
             // Unrecognized message type
             else

@@ -124,6 +124,13 @@
  * 119      09-Oct-25   Build and test on Rev9M board - revised Smart AC charge logic per design document
  * 120      10-Oct-25   Build and test on Rev9M board - baselined onto project zioxi-trolley2 with github repository, removed AB1805 support and library and other compile flags
  * 121      11-Oct-25   Build and test on Rev9M board - zioxi-8765, CTUE event LA = 0 and LV = measured
+ * 122      12-Oct-25   Build and test on Rev9M board - zioxi-8753, remove "MD" from events
+ * 123      13-Oct-25   Build and test on Rev9M board - zioxi-8770, fix for POS Smart AC charge - returns to Smart USB-C charge when mains off when in standby
+ * 124      13-Oct-25   Build and test on Rev9M board - zioxi-8768, fix for POS auto resume not working for Smart AC charge
+ * 125      13-Oct-25   Build and test on Rev12 board - add compile switch to add support for Rev12 board
+ * 126      13-Oct-25   Build and test on Rev12 board - add constant soft start delay SSDELAY rather than parameter
+ * 127      13-Oct-25   Build and test on Rev12 board - zioxi-8781, BLE commands to get operation mode and set operation mode to Local or Connected
+ * 128      14-Oct-25   Build and test on Rev12 board - zioxi-8781, add parameter to hold local or connected mode so the device will not forget on restart/restore
  */ 
 
 // P2-PDU-base *************************************
@@ -134,6 +141,7 @@
 #define LOCAL_TIME_RK false                 //V082
 #define SERIAL_WAIT true                    //V083
 #define RESET_AUTO_SMART_MONITORING false   //V110
+#define REV12_BOARD true                    //V125
 
 #include "Particle.h"
 
@@ -160,10 +168,10 @@
 SYSTEM_MODE(SEMI_AUTOMATIC);            //let firmware manage the connection to the Particle Cloud
 
 const char* const firmware         =   "6.3.4";
-const char* const softwarebuild    =   "121 11-10-25";
-const char* const hardwarebuild    =   "Rev09M";
+const char* const softwarebuild    =   "128 14-10-25";
+const char* const hardwarebuild    =   "Rev12";
 
-PRODUCT_VERSION(121);
+PRODUCT_VERSION(128);
 
 // instantiations
 MCP9800 tmpSensor;                      //always instantiate onboard MCP9800 sensor
@@ -234,7 +242,6 @@ typedef struct {
 
 powerData powerdata;
 
-
 typedef struct {
     float batvolts;
     bool isCharging;
@@ -262,9 +269,14 @@ hubData hubdata;                                // hubdata structure to hold hub
 #endif  // LVSUNCHARGER
 
 // Pin definitions
+#if REV12_BOARD
+const pin_t P2_PDU_RELAYS[] = {D19, D18, D21, D6};
+#else   // REV09M_BOARD
+const pin_t P2_PDU_RELAYS[] = {D19, D18, D7, D6};
+#endif  // REV12_BOARD
+
 const pin_t P2_PDU_SUPPLY_DETECT = A5;
 const pin_t P2_PDU_WAKE = WKP;
-const pin_t P2_PDU_RELAYS[] = {D19, D18, D7, D6};
 
 const pin_t P2_PDU_5V_I2C_EN = D20;
 const pin_t P2_PDU_3V3_SW_EN = D12;
@@ -348,7 +360,7 @@ enum PowerOnState {
     POS_SMART_USB = 8 // Smart USB - resume in smart USB state
 };
 
-// charge state values
+// charge state values (KL)
 #define C_NOT_CHARGING          0
 #define C_CHARGING              1
 #define C_RATE_CHARGING         7
@@ -425,7 +437,7 @@ const char* const eventstartupres =    "DERS";
 const char* const eventdiagnostic =    "DIAG";
 const char* const eventwifiupdate =    "DEUP";
 
-#define SERLEN 11                           //Serial number length
+#define SERLEN 7                            //Serial number length (amended to 7 characters V120)
 #define PRODLEN 30                          //Product Type, Name, Code length
 #define MAXLEN 7                            //Item name length reduced to 7 to see if works better with BLE advertising V059/V090
 #define ARRAYSIZE 42                        //schedule byte array size
@@ -514,7 +526,7 @@ void onViewRunState();
 
 struct deviceSettings
 {
-    int     magicNumber = 0x99DEA118;   //must be changed if struct changes or default values set to show upgrade of struct
+    int     magicNumber = 0x99DEA128;   //must be changed if struct changes or default values set to show upgrade of struct
     byte    resumeFlag = 0;             //=28 if set before hard reset or 0 if not or 5 firmware flashed V097
     int     timerPeriod = DEFAULTIMER;  //timer period in minutes (to start)
     bool    isDst = false;              //daylight saving time
@@ -541,7 +553,6 @@ struct deviceSettings
     int     numDevices = 0;             //total number of devices in trolley/cabinet sum of DPO[] V118
     int     doorSensors = 0;            //number of door sensors - DRS
     int     tempSensors = 0;            //number of temperature sensors (default onboard only) - TMP
-    int     softStartDelay = SSDELAY;   //number of milliseconds between turn on of relays
     int     extraChargingTime = 1;      //extra charging time after charging done - EXT V118
     int     maxTemp = MAXTEMPC;         //maximum temperature before warning in oC - MXT
     bool    isAuto = false;             //to ensure auto is re-engaged after a restart or charging cycle  this can be Auto On/Off or Auto On_Until_Charged 
@@ -553,6 +564,7 @@ struct deviceSettings
     int     powerOnState = POS_CONT_ON; //power on state - default continuous on - POS
     uint8_t hubBoard = 0;               //hub board present - 'UC' in product code V076
     float   powerMeterFactor = 0.9456;  //power meter factor to multiply raw output from ACS37800 in amps to get actual current in amps
+    bool    isLocalMode = false;        //local mode - not connected to cloud default is connected V128
     uint8_t padding[3] = {0};           //fill to 4 byte multiple boundary
     int     checkSum  = 0;              //checksum value is always the last item
 };
@@ -947,17 +959,9 @@ void setup()
 	provision_state = next_provision_state = STATE_IDLE;
     
     BLEWiFiSetupManager::instance().setup((const char*) param.itemName); //V101
-    /*
-    char _name[8] = {0};
-    snprintf(_name, sizeof(_name), "T%c%c%c%c%c%c", param.serialNum[4], param.serialNum[5], param.serialNum[6], param.serialNum[7], param.serialNum[8], param.serialNum[9]); //V090
-    BLEWiFiSetupManager::instance().setup((const char*) _name);
-    */
     BLEWiFiSetupManager::instance().setProvisionCallback(provisionCb);
 
-    if (WiFi.hasCredentials() && !(WiFi.ready()))
-    {
-        provision_state = next_provision_state = STATE_CREDENTIALS;
-    }
+    if (WiFi.hasCredentials() && !(WiFi.ready()))    provision_state = next_provision_state = STATE_CREDENTIALS;
 
     WiFiChannelRK::instance().withUpdateCallback(updateCallback).setup();
 
@@ -1200,12 +1204,17 @@ void initialDESTevent()
 
     if (hubversion == 0)
     {
-        Log.error("LVSUN Hub not found or not responding");
+        Log.info("LVSUN Hub board not found or not responding");
+        param.hubBoard = 0; // hub board not found or not responding V124
+        putParameters();    //V124
         fault[7] = 7; // handle the hub board not found/responding case
     }
     else 
     {
         fault[7] = 0; // OK, hub board found and responding
+        param.hubBoard = 1; // hub board found V124
+        putParameters();    //V124
+        Log.info("LVSUN Hub board version: %lu", hubversion);
         int8_t temp = 0;
         hubdata.firmwareRevision = hubversion%100;
         //Log.info("LVSUN Hub firmware version: %i", hubdata.firmwareRevision);
@@ -1272,7 +1281,7 @@ void initialDESTevent()
     writer.name("MNR").value((double) param.minChargeRate); //V118
     writer.name("MNC").value((double) param.minCurrent);    //V118
     writer.name("WUP").value(param.warmupMins);   //V118
-    writer.name("MD").value(param.numDevices);
+    //writer.name("MD").value(param.numDevices);  //V122
     writer.name("DS").value(param.doorSensors);
     writer.name("TS").value(param.tempSensors);
     writer.name("J").value(param.isDst?1:0);
@@ -1320,6 +1329,7 @@ void initialDESTevent()
 
     writer.name("POS").value(param.powerOnState);
     if (bleAddr[0] != 0) writer.name("BLE").value((const char*)bleAddr);
+    writer.name("LOC").value(param.isLocalMode);    //V128
     writer.endObject();
     PublishQueuePosix::instance().publish(eventstartupdat, dataStr, 50, PRIVATE);
 }
@@ -1914,7 +1924,10 @@ void setupNetwork()
 {
     EthernetWiFi::instance().setup();
     EthernetWiFi::instance().withEthernetConnectTimeout(std::chrono::milliseconds(2min));
-    EthernetWiFi::instance().setAutomaticInterface(true);           //select according to what is available Ethernet or WiFi
+
+    Log.info("setupNetwork Operation mode local: %c", param.isLocalMode?'T':'F'); //V128
+    if (param.isLocalMode) EthernetWiFi::instance().setAutomaticInterface(false);  //set for local mode V128
+    else                   EthernetWiFi::instance().setAutomaticInterface(true);   //select according to what is available Ethernet or WiFi to connect
 
     connectTime = millis();
     eventdelay = checknetwork = millis();
@@ -1930,37 +1943,60 @@ void checkNetworks()
     {
         checknetwork = millis();
 
-        isEthernetConnected = Ethernet.ready();
+        int activenetwork = EthernetWiFi::instance().getActiveInterface();
 
-        if      (isEthernetConnected && !wasEthernetConnected)  {wasEthernetConnected = true; }
-        else if (!isEthernetConnected && wasEthernetConnected)  {wasEthernetConnected = false;}
-
-        if      (!isEthernetConnected)
+        if ((activenetwork == (int) EthernetWiFi::ActiveInterface::OFF) && !param.isLocalMode) // V128
         {
-            isWiFiConnected = WiFi.ready();
-            
-            if      (isWiFiConnected && !wasWiFiConnected)      {wasWiFiConnected = true; }
-            else if (!isWiFiConnected && wasWiFiConnected)      {wasWiFiConnected = false;}
+            Log.info("Switched to local mode update parameters");
+            param.isLocalMode = true;
+            putParameters();
+        }
+        else if ((activenetwork != (int) EthernetWiFi::ActiveInterface::OFF) && param.isLocalMode)
+        {
+            Log.info("Switched to connected mode update parameters");
+            param.isLocalMode = false;
+            putParameters();
         }
 
-        if (isEthernetConnected || isWiFiConnected)
+        if (param.isLocalMode)
         {
-            bool isCloudConnected = Particle.connected();
-            if (!isCloudConnected && wasNotCalledConnect) {wasNotCalledConnect = false; Particle.connect();}
-            if      (isCloudConnected && !wasCloudConnected)
-            {
-                wasCloudConnected = true;
-                connectedSince = millis();
-                MCP7940.adjust(Time.now());             // RTC updated with current time once cloud connected V093
-            }
-            else if (!isCloudConnected && wasCloudConnected)
-            {
-                wasCloudConnected = false;
-                ethernetConnectedCount++;
-                connectedSince = 0UL;
-            }
+            Log.info("Operating in local mode - no cloud connection attempts");
         }
-        networkInfoEvent(); // publish network info event V070
+        else
+        {
+            isEthernetConnected = Ethernet.ready();
+
+            if      (isEthernetConnected && !wasEthernetConnected)  {wasEthernetConnected = true; }
+            else if (!isEthernetConnected && wasEthernetConnected)  {wasEthernetConnected = false;}
+
+            if      (!isEthernetConnected)
+            {
+                isWiFiConnected = WiFi.ready();
+                
+                if      (isWiFiConnected && !wasWiFiConnected)      {wasWiFiConnected = true; }
+                else if (!isWiFiConnected && wasWiFiConnected)      {wasWiFiConnected = false;}
+            }
+
+            if (isEthernetConnected || isWiFiConnected)
+            {
+                bool isCloudConnected = Particle.connected();
+                if (!isCloudConnected && wasNotCalledConnect) {wasNotCalledConnect = false; Particle.connect();}
+                if      (isCloudConnected && !wasCloudConnected)
+                {
+                    wasCloudConnected = true;
+                    connectedSince = millis();
+                    MCP7940.adjust(Time.now());             // RTC updated with current time once cloud connected V093
+                }
+                else if (!isCloudConnected && wasCloudConnected)
+                {
+                    wasCloudConnected = false;
+                    ethernetConnectedCount++;
+                    connectedSince = 0UL;
+                }
+            }
+
+            networkInfoEvent(); // publish network info event V070
+        }
     }
 }
 
@@ -2043,55 +2079,71 @@ void wifiProvisioning()
         case STATE_PROVISIONED:                         //this state is set by the provision callback from BLEWiFiSetupManager
         {
             next_provision_state = STATE_PROVISIONED;
-            if (!(WiFi.ready()))                        //Credentials set and waited 40 seconds but not connected what should be done?
+            if (param.isLocalMode)                      //V128
             {
-                Log.info("WiFi credentials provisioned but not connected to WiFi goto STATE_IDLE");
-                wasBLEinformed = false; //V101
-                next_provision_state = STATE_IDLE;
-            }
-            else if (WiFi.ready() && !(Particle.connected()))
-            {
-                Log.info("WiFi but not Cloud connected");
-                WiFi.listen(false); //stop listening V105
-                wasBLEinformed = false; //V101
-                cloudConnected();
+                Log.info("In local mode no connection provisioned credentials");
                 next_provision_state = STATE_IDLE;
             }
             else
             {
-                Log.info("WiFi and Cloud connected");
-                next_provision_state = STATE_IDLE;
+                if (!(WiFi.ready()))                        //Credentials set and waited 40 seconds but not connected what should be done?
+                {
+                    Log.info("WiFi credentials provisioned but not connected to WiFi goto STATE_IDLE");
+                    wasBLEinformed = false; //V101
+                    next_provision_state = STATE_IDLE;
+                }
+                else if (WiFi.ready() && !(Particle.connected()))
+                {
+                    Log.info("WiFi but not Cloud connected");
+                    WiFi.listen(false); //stop listening V105
+                    wasBLEinformed = false; //V101
+                    cloudConnected();
+                    next_provision_state = STATE_IDLE;
+                }
+                else
+                {
+                    Log.info("WiFi and Cloud connected");
+                    next_provision_state = STATE_IDLE;
+                }
             }
             break;
         }
 
         case STATE_CREDENTIALS:                         //this state is set in setup if credentials are available
         {
-            if (WiFi.hasCredentials() && !(WiFi.ready()))
+            if (param.isLocalMode)                      //V128
             {
-                Log.info("WiFi credentials available, connecting to WiFi");
-                wasBLEinformed = false; //V101
-                WiFi.connect();
-                waitFor(WiFi.ready, 20000);
-                if (WiFi.ready())
-                {
-                    WiFi.listen(false); //stop listening V105
-                    cloudConnected();
-                    next_provision_state = STATE_IDLE;
-                }
-            }
-            else if (WiFi.ready() && !(Particle.connected()))
-            {
-                Log.info("WiFi but not Cloud connected");
-                wasBLEinformed = false; //V101
-                cloudConnected();
+                Log.info("In local mode no connection with credentials");
                 next_provision_state = STATE_IDLE;
             }
             else
             {
-                Log.info("WiFi and Cloud connected");
-                wasBLEinformed = false; //V101
-                next_provision_state = STATE_IDLE;
+                if (WiFi.hasCredentials() && !(WiFi.ready()))
+                {
+                    Log.info("WiFi credentials available, connecting to WiFi");
+                    wasBLEinformed = false; //V101
+                    WiFi.connect();
+                    waitFor(WiFi.ready, 20000);
+                    if (WiFi.ready())
+                    {
+                        WiFi.listen(false); //stop listening V105
+                        cloudConnected();
+                        next_provision_state = STATE_IDLE;
+                    }
+                }
+                else if (WiFi.ready() && !(Particle.connected()))
+                {
+                    Log.info("WiFi but not Cloud connected");
+                    wasBLEinformed = false; //V101
+                    cloudConnected();
+                    next_provision_state = STATE_IDLE;
+                }
+                else
+                {
+                    Log.info("WiFi and Cloud connected");
+                    wasBLEinformed = false; //V101
+                    next_provision_state = STATE_IDLE;
+                }
             }
             break;
         }
@@ -2187,18 +2239,19 @@ void goToStandbyController()
 // exit to   : runState = D_GOTOSLEEP if mains off or stay in D_STANDBY if overheated but set flag overheated to prevent relays from being turned on
 void standbyController()
 {
-    powerState = powerStateCheck();                     //check power supply
-    if (powerState == W_MAINS_ON)                       //only when mains powered
+    powerState = powerStateCheck();                  //check power supply
+    if (powerState == W_MAINS_ON)                    //only when mains powered
     {
-        runState = D_STANDBY;                           //stay in standby
+        //runState = D_STANDBY;                      //stay in standby V124
+        prevRunState = runState;                     //save previous run state for resume V124
         checkOverheated();
-        if (isOverheated && !wasOverheated)             //if overheated then set flag
+        if (isOverheated && !wasOverheated)          //if overheated then set flag
         {
             wasOverheated = true;                       //set flag to true not acted upon
             // do something here, go to sleep etc. relevant to the run state
         }
         
-        if (!isOverheated && wasOverheated)        //if not overheated then reset flag
+        if (!isOverheated && wasOverheated)          //if not overheated then reset flag
         {
             wasOverheated = false;                      //reset flag to false
             // do something here, resume etc. relevant to the run state
@@ -2207,9 +2260,11 @@ void standbyController()
     else if (powerState == W_MAINS_OFF) 
     {
         mainsPowerOffEvent(); 
-        param.resumeState = D_STANDBY; 
+        param.resumeState = D_STANDBY;              //save current run state for resume V123
+        param.resumeCause = RESUME_MAINS_OFF;
+        param.resumeMinutes = -1;
         putParameters();
-        prevRunState = runState;                   //save previous run state for resume
+        prevRunState = runState;                    //save previous run state for resume
         runState = D_GOTOSLEEP;
     }
     else                                            //this is an error condition as neither MAINS_ON or OFF
@@ -2810,6 +2865,7 @@ void goToChargedOnController()
 // exit to   : runState = D_CHARGED_ON_AUTO if OK or D_GOTOSTANDBY
 void goToChargedOnAutoController()
 {
+    powerState = powerStateCheck();                                             //check power supply V123
     if (powerState == W_MAINS_ON || powerState == W_CHARGING)                   //correction to add powerState = W_CHARGING as now handling other than just standby/mains on
     {
         if (runState == D_GOTOCHARGED_ON_AUTO)
@@ -2880,7 +2936,7 @@ void helperGoToCharged(int context)
 }
 
 // entry from: runState = D_CHARGED_ON or D_CHARGED_ON_AUTO or D_AUTO_ON ?? 
-// function  : monitor for user action or devices fully charged - charge period suspends on mains off and resumes when on, maximum on charge period overrides charge status
+// function  : monitor for user action or smart AC devices fully charged - charge period suspends on mains off and resumes when on, maximum on charge period overrides charge status
 // exit to   : runState = D_GOTOSTANDBY if web command
 void chargedOnController()
 {
@@ -2899,8 +2955,8 @@ void chargedOnController()
         if ((oucState == ON_UNTIL_CHARGE) && (chargeMins >= param.maxTimeOn))   //charging and maximum time on charge reached => stop
         {
             Log.info("smart AC charge maximum time on charge reached %i mins", chargeMins);
-            snprintf(dataStr, MAXDATA, "\"CX\":\"MaxTimeOn CAmps %f Cslope %.8f Cstate %i\"}", powerdata.ampsrms, cSlope, chargeState);
-            PublishQueuePosix::instance().publish(eventsmartcdata,dataStr, 50, PRIVATE);                         //send smart charge data
+            //snprintf(dataStr, MAXDATA, "\"CX\":\"MaxTimeOn CAmps %f Cslope %.8f Cstate %i\"}", powerdata.ampsrms, cSlope, chargeState);
+            //PublishQueuePosix::instance().publish(eventsmartcdata,dataStr, 50, PRIVATE);                         //send smart charge data
             wasSmartChargeEndedThisHalfHour = true;
             stoptimerCharging();
             ACRelaysOff(M_ONTIL);                                               //turn off relays and send event
@@ -2970,8 +3026,10 @@ void chargedOnController()
             }
             else if (powerState == W_MAINS_OFF && ((millis() - mainsofftime) > GOTOSLEEPDELAY)) //mains off for delay period
             {
-                param.resumeState = runState;                                   //added so that if mains off then after a period it will sleep and may go off if no battery power left V146
-                param.resumeMinutes = 0;                                        //smart charge and auto smart will always need to restart the cycle V146
+                prevRunState = runState;                                        //V124
+                param.resumeCause = RESUME_MAINS_OFF;                           //save the current charge time to eeprom
+                param.resumeState = runState;                                   //added so that if mains off then after a period it will sleep and may go off if no battery power left
+                param.resumeMinutes = 0;                                        //smart charge and auto smart will always need to restart the cycle
                 putParameters();
                 runState = D_GOTOSLEEP;
             }
@@ -4155,7 +4213,7 @@ void ACRelaysOn(int context)
     for (size_t i = 0; i < sizeof(P2_PDU_RELAYS) / sizeof(P2_PDU_RELAYS[0]); i++)
     {
         pinSetFast(P2_PDU_RELAYS[i]);
-        delay(1000 * param.softStartDelay);
+        delay(1000 * SSDELAY);  // phased start of relays to avoid inrush current issues V126
     }
 
     #if LVSUNCHARGER
@@ -4163,7 +4221,7 @@ void ACRelaysOn(int context)
     for (int8_t i = 0; i < hubdata.channelsIn; i++)
     {
         LVSUNInputChannelsOnOff(I2C_ADDRESS, (uint8_t) i+1, true); // turn on LVSUN input channels V059
-        delay(1000 * param.softStartDelay);
+        delay(1000 * SSDELAY);  // phased start of relays to avoid inrush current issues V126
     }
     if (hubdata.channelsIn > 0) Log.info("LVSUN Input Channels turned on");
     #endif // LVSUNCHARGER
@@ -5406,6 +5464,13 @@ int remoteParam(const char * command)
         param.powerOnState = i;
         putParameters();
         return 69;                                      // all OK
+    }
+    else if (strncmp(command, "loc", 3) == 0)           //set to local mode operation V128
+    {
+        EthernetWiFi::instance().setAutomaticInterface(false);
+        param.isLocalMode = true;
+        putParameters();
+        return 70;                                      // all OK
     }
     else
     {
