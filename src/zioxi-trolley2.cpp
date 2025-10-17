@@ -131,6 +131,9 @@
  * 126      13-Oct-25   Build and test on Rev12 board - add constant soft start delay SSDELAY rather than parameter
  * 127      13-Oct-25   Build and test on Rev12 board - zioxi-8781, BLE commands to get operation mode and set operation mode to Local or Connected
  * 128      14-Oct-25   Build and test on Rev12 board - zioxi-8781, add parameter to hold local or connected mode so the device will not forget on restart/restore
+ * 129      14-Oct-25   Build and test on Rev12 board - initial batch with serial connected wait turned off
+ * 130      15-Oct-25   Build and test on Rev12 board - zioxi-8766, revised events and variable for smart charging status
+ * 131      16-Oct-25   Build and test on Rev12 board - zioxi-8794, suppress DRUP event between web command and ACRelaysOn event and ensure first DRUP 40 seconds after ACRelaysOn
  */ 
 
 // P2-PDU-base *************************************
@@ -139,7 +142,7 @@
 #define CMD_BUFFER false
 #define LVSUNCHARGER true
 #define LOCAL_TIME_RK false                 //V082
-#define SERIAL_WAIT true                    //V083
+#define SERIAL_WAIT false                   //V083
 #define RESET_AUTO_SMART_MONITORING false   //V110
 #define REV12_BOARD true                    //V125
 
@@ -168,10 +171,10 @@
 SYSTEM_MODE(SEMI_AUTOMATIC);            //let firmware manage the connection to the Particle Cloud
 
 const char* const firmware         =   "6.3.4";
-const char* const softwarebuild    =   "128 14-10-25";
+const char* const softwarebuild    =   "131 16-10-25";
 const char* const hardwarebuild    =   "Rev12";
 
-PRODUCT_VERSION(128);
+PRODUCT_VERSION(131);
 
 // instantiations
 MCP9800 tmpSensor;                      //always instantiate onboard MCP9800 sensor
@@ -361,13 +364,15 @@ enum PowerOnState {
 };
 
 // charge state values (KL)
-#define C_NOT_CHARGING          0
-#define C_CHARGING              1
-#define C_RATE_CHARGING         7
-#define C_RATE_CHARGING_PLUS    8
-#define C_CHARGING_DONE         9
-#define C_CHARGING_ENDED        10
-
+enum ChargeState {
+    C_NOT_CHARGING = 0,  //not charging
+    C_CHARGING = 1,      //charging or warm-up charging
+    C_CHARGING_FULL = 2, //full rate charging-warm up ended V130
+    C_RATE_CHARGING = 7, //rate monitoring
+    //C_RATE_CHARGING_PLUS = 8, //confirmed rate monitoring V130 removed
+    C_CHARGING_DONE = 9, //rate monitoring slope < target or time expired
+    C_CHARGING_ENDED = 10 //charging stopped after extra time
+};
 // onView web app RunState values
 #define W_STANDBY               1 
 #define W_TIMED_ON              3 
@@ -414,8 +419,6 @@ const char* const eventschedulexp =    "CTSX";
 const char* const eventunlocked   =    "CTUN";
 const char* const eventlocked     =    "CTLK";
 const char* const eventoverheated =    "CTOV";
-const char* const eventchargedata =    "CTCD";
-const char* const eventsmartcdata =    "CTSM";
 const char* const eventmainsoff   =    "CTMX";
 const char* const eventmainsresum =    "CTMR";
 
@@ -625,7 +628,7 @@ volatile bool isUpdateTimer = false;
 uint32_t lastLocalTime = 0;
 volatile bool isScheduleChanged = false;
 bool isSleepWake = false;                                           //V072
-bool isUSBCjustStarted = false;                                     //V107
+bool isChargingJustStarted = false;                                     //V107
 bool isChargingStarted = false;                                     //V108
 
 String SerialNum = "T225000";
@@ -688,13 +691,16 @@ void goToAutoController();
 void autoController();
 void goToChargedOnController();
 void chargedOnController();
+void helperSendFullRateChargingEvent();     //V130
+void helperSendRateMonitoringChargingEvent(); //V130
+void helperSendChargingDoneEvent();         //V130
 void goToChargedOnAutoController();
 void goToChargedOnUSBCController();
 void goToChargedOnUSBCAutoController();
 void chargedOnUSBCController();
 bool sampleHubPorts();
 void helperGoToUSBCCharged(int context);
-void checkScheduledStartUntilCharged();      //V111
+void checkScheduledStartUntilCharged();     //V111
 
 void webGoToTimedController();
 void webGoToAutoController();
@@ -764,11 +770,11 @@ timer_t lastRelayOn = 0;
 timer_t lastRelayOff = 0;
 timer_t currentupdate;
 timer_t hubupdate;
-timer_t usbcinitialupdate;      //V107
+timer_t charginginitialupdate;      //V107
 
 int loopRate;
 
-const timer_t USBC_INITIAL_DRUP = 40000UL; // 40 seconds V107
+const timer_t DELAY_INITIAL_DRUP = 40000UL; // 40 seconds V107
 const timer_t HUB_UPDATE_INTERVAL = 20000UL; // 20 seconds V106
 const timer_t HUB_COMPLETION_DELAY = 300000UL; // 5 minutes V106
 const timer_t NETWORK_CHECK_INTERVAL = 10000UL;
@@ -2507,10 +2513,6 @@ void autoController()
                     starttimerCharging();                       //start charge timer
                     isChargingStarted = true;                   //indicate charging has started to reset the update event timer V108    
                     ACRelaysOn(context);                        //turn off relays and send event
-
-                    isUSBCjustStarted = false; //V109
-                    if (param.hubBoard == 1)  usbcinitialupdate = millis(); //set the initial update time V109
-                    else usbcinitialupdate = 0;
                 }
                 else if (isOverheated && !wasOverheated)        //has just become overheated
                 {
@@ -2532,12 +2534,7 @@ void autoController()
                     runState = D_GOTOSLEEP;
                 }
 
-                if (usbcinitialupdate > 0 && (millis() - usbcinitialupdate >= USBC_INITIAL_DRUP)) //V109
-                {
-                    usbcinitialupdate = 0;      //only do this once
-                    isUSBCjustStarted = true;   //flag to indicate initial charging period has ended and DRUP should be sent
-                    Log.info("USBC autoController initial charging period ended");
-                }
+                helperCheckFirstDRUP();                         //V131
 
                 if (isUpdateTimer)
                 {
@@ -2709,21 +2706,20 @@ bool hasScheduleExpired()
     return _result;
 }
 
-// helper called when USBC initial charging period has ended to set flag and reset initial update time V116
+// helper called when charging started (ACRelaysOn) to set flag and initial update time V116
 void helperDelayDRUP()
 {
-        isUSBCjustStarted = false; //V109
-        if (param.hubBoard == 1)  usbcinitialupdate = millis(); //set the initial update time V109
-        else usbcinitialupdate = 0;
+        isChargingJustStarted = false; //V109
+        charginginitialupdate = millis(); //set the initial update time V109/V131
 }
 
 // helper to check for first DRUP event after charging started V116
 void helperCheckFirstDRUP()
 {
-    if (usbcinitialupdate > 0 && (millis() - usbcinitialupdate >= USBC_INITIAL_DRUP)) //V109
+    if (charginginitialupdate > 0 && (millis() - charginginitialupdate >= DELAY_INITIAL_DRUP)) //V109
     {
-        usbcinitialupdate = 0;      //only do this once
-        isUSBCjustStarted = true;   //flag to indicate initial charging period has ended and DRUP should be sent
+        charginginitialupdate = 0;      //only do this once
+        isChargingJustStarted = true;   //flag to indicate initial charging period has ended and DRUP should be sent
     }
 }
 
@@ -2954,9 +2950,8 @@ void chargedOnController()
 
         if ((oucState == ON_UNTIL_CHARGE) && (chargeMins >= param.maxTimeOn))   //charging and maximum time on charge reached => stop
         {
-            Log.info("smart AC charge maximum time on charge reached %i mins", chargeMins);
-            //snprintf(dataStr, MAXDATA, "\"CX\":\"MaxTimeOn CAmps %f Cslope %.8f Cstate %i\"}", powerdata.ampsrms, cSlope, chargeState);
-            //PublishQueuePosix::instance().publish(eventsmartcdata,dataStr, 50, PRIVATE);                         //send smart charge data
+            chargeState = C_CHARGING_ENDED;                                    //set chargeState to ended V130
+            Log.info("smart AC charge maximum time on charge reached %i mins ChargeState %i", chargeMins, chargeState);
             wasSmartChargeEndedThisHalfHour = true;
             stoptimerCharging();
             ACRelaysOff(M_ONTIL);                                               //turn off relays and send event
@@ -2973,14 +2968,14 @@ void chargedOnController()
         else if (oucState == ON_UNTIL_WARM && chargeMins >= param.warmupMins)   //warmup period has ended
         {
             oucState = ON_UNTIL_CHARGE;
+            chargeState = C_CHARGING_FULL;                                      //set chargeState to full charge V130
             iStep = 0;
             chargingDevices = 0;
             sampleCurrent();
             currentupdate = millis();
             param.numDevices = numberOfAdaptors();                             //get number of devices connected V119
-            Log.info("smart AC charge WARMUP ended after %i minutes CAmps %f", chargeMins, powerdata.ampsrms);
-            snprintf(dataStr, MAXDATA, "\"CX\":\"WARMUP finished CAmps %f Cstate %i\"}", powerdata.ampsrms, chargeState);
-            PublishQueuePosix::instance().publish(eventsmartcdata,dataStr, 50, PRIVATE);        //send smart charge data
+            Log.info("smart AC charge WARMUP ended after %i minutes ChargeState %i CAmps %f", chargeMins, chargeState, powerdata.ampsrms);
+            helperSendFullRateChargingEvent();
         }
         else                                                                    //maximum time not exceeded or suspended/not yet started
         {
@@ -3043,7 +3038,7 @@ void chargedOnController()
                         sampleCurrent();                                        //sample current and updates amps global variable
                         Log.info("determineChargeState CAmps %f", powerdata.ampsrms); 
                         chargeState = determineChargeState(chargeState, cSlope, powerdata.ampsrms, param.numDevices, chargeMins);     //set chargeState value
-                        if (chargeState == C_RATE_CHARGING || chargeState == C_RATE_CHARGING_PLUS)
+                        if (chargeState == C_RATE_CHARGING) //V130
                         {
                             if (dataPoints == 0)                                //first entry after slope monitoring started
                             {
@@ -3064,17 +3059,18 @@ void chargedOnController()
                             }
                             cSlope = linearRegression(dataPoints, timeX, ampsY);//calculate slope of charging vs time - take the absolute value 
                         }
-                        if ((lastChargeState != chargeState) && (chargeState == C_CHARGING || chargeState == C_RATE_CHARGING || chargeState == C_RATE_CHARGING_PLUS || chargeState == C_CHARGING_DONE))  //on charge V119
+
+                        if ((lastChargeState != chargeState) && (chargeState == C_RATE_CHARGING || chargeState == C_CHARGING_DONE))  //on charge V119/V130
                         {
                             Log.info("Charge State Changed %i to %i", lastChargeState, chargeState);
-                            memset(dataStr, 0, sizeof(dataStr));
-                            JSONBufferWriter writer(dataStr, sizeof(dataStr) - 1);
-                            writer.beginObject();
-                            writer.name("date").value((const char*)getCreatedTime());
-                            writer.name("R").value(runStateInt);
-                            writer.name("KL").value(chargeState);
-                            writer.endObject();
-                            PublishQueuePosix::instance().publish(eventvarchanged,dataStr, 50, PRIVATE);
+                            if (chargeState == C_RATE_CHARGING) 
+                            {
+                                helperSendRateMonitoringChargingEvent();
+                            }
+                            else if (chargeState == C_CHARGING_DONE) 
+                            {
+                                helperSendChargingDoneEvent();
+                            }
                         }
                         currentupdate = millis();
                     }
@@ -3096,6 +3092,57 @@ void chargedOnController()
             }
         }
     } //end if runState == D_CHARGED_ON or D_CHARGED_ON_AUTO or D_AUTO_ON
+}
+
+// helper to send full rate charging event V130
+void helperSendFullRateChargingEvent()
+{
+    Log.info("helperSendFullRateChargingEvent");
+    memset(dataStr, 0, sizeof(dataStr));
+    JSONBufferWriter writer(dataStr, sizeof(dataStr) - 1);
+    writer.beginObject();
+    writer.name("date").value((const char*)getCreatedTime());
+    writer.name("CX").value("Full rate Charging Smart AC"); //V130
+    writer.name("R").value(runStateInt);
+    writer.name("LA").value((double) powerdata.ampsrms,3);
+    writer.name("LV").value((double) powerdata.voltsrms,3);
+    writer.name("KL").value(chargeState);   //V130
+    writer.endObject();
+    PublishQueuePosix::instance().publish(eventvarchanged,dataStr, 50, PRIVATE);        //send smart charge data
+}
+
+// helper to send rate monitoring charging event V130
+void helperSendRateMonitoringChargingEvent()
+{
+    Log.info("helperSendRateMonitoringChargingEvent");
+    memset(dataStr, 0, sizeof(dataStr));
+    JSONBufferWriter writer(dataStr, sizeof(dataStr) - 1);
+    writer.beginObject();
+    writer.name("date").value((const char*)getCreatedTime());
+    writer.name("CX").value("Rate monitoring started"); //V130
+    writer.name("R").value(runStateInt);
+    writer.name("LA").value((double) powerdata.ampsrms,3);
+    writer.name("LV").value((double) powerdata.voltsrms,3);
+    writer.name("KL").value(chargeState);   //V130
+    writer.endObject();
+    PublishQueuePosix::instance().publish(eventvarchanged,dataStr, 50, PRIVATE);        //send smart charge data
+}
+
+// helper to send charging done event V130
+void helperSendChargingDoneEvent()
+{
+    Log.info("helperSendChargingDoneEvent");
+    memset(dataStr, 0, sizeof(dataStr));
+    JSONBufferWriter writer(dataStr, sizeof(dataStr) - 1);
+    writer.beginObject();
+    writer.name("date").value((const char*)getCreatedTime());
+    writer.name("CX").value("Rate Monitoring Done"); //V130
+    writer.name("R").value(runStateInt);
+    writer.name("LA").value((double) powerdata.ampsrms,3);
+    writer.name("LV").value((double) powerdata.voltsrms,3);
+    writer.name("KL").value(chargeState);   //V130
+    writer.endObject();
+    PublishQueuePosix::instance().publish(eventvarchanged,dataStr, 50, PRIVATE);        //send smart charge data
 }
 
 // helper Smart AC/USBC Charging for Mains Off or Overheated
@@ -3197,7 +3244,7 @@ void helperGoToUSBCCharged(int _context)
     starttimerCharging();
     isChargingStarted = true;                //indicate charging has started to reset the update event timer V108    
     hubupdate = millis();                    //set the hub update time
-    usbcinitialupdate = millis();            //set the initial update time V107
+    charginginitialupdate = millis();            //set the initial update time V107
     Log.info("helperGoToUSBCCharged exit oucState %i resume mins %i", oucState, param.resumeMinutes);
 }
 
@@ -3389,6 +3436,8 @@ void webGoToTimedController()
     previousStateHandler(prevRunState);
     prevRunState = runState; 
     runState = D_GOTOTIMED_ON;
+    isChargingStarted = true;                //reset update event timer so that DRUP isn't sent V131    
+
 }
 
 // entry from: runState = D_WEBGOTOAUTO in Remote_Admin
@@ -3435,6 +3484,7 @@ void webGoToOnController()
     previousStateHandler(prevRunState);
     prevRunState = runState; 
     runState = D_GOTOALWAYS_ON;
+    isChargingStarted = true;                //reset update event timer so that DRUP isn't sent V131    
 }
 
 // entry from: runState = D_WEBGOTOCHARGED or D_WEBGOTOCHARGEDUSBC in Remote_Admin
@@ -3454,12 +3504,13 @@ void webGoToChargedController()
     writer.name("date").value((const char*)getCreatedTime());
     if (runState == D_WEBGOTOCHARGED)   writer.name("R").value((int) W_CHARGED_ON);
     else                                writer.name("R").value((int) W_CHARGED_ON_USBC);
-    writer.name("KL").value((int) C_CHARGING);  //V103
+    //writer.name("KL").value((int) C_CHARGING);  //V103/V130
     writer.endObject();
     PublishQueuePosix::instance().publish(eventchargeweb, dataStr, 50, PRIVATE);
     previousStateHandler(prevRunState);
     if (runState == D_WEBGOTOCHARGED)   runState = D_GOTOCHARGED_ON;
     else                                runState = D_GOTOCHARGED_ON_USBC;
+    isChargingStarted = true;                //reset update event timer so that DRUP isn't sent V131    
 }
 
 // entry from: runState = D_WEBOUCAUTO in Remote_Admin
@@ -3945,7 +3996,7 @@ int determineChargeState(int _chargeState, float _slope, float _amps, int _devic
     {
         charge_state = _chargeState;
     }
-    else if (_chargeState == C_RATE_CHARGING_PLUS || _chargeState == C_RATE_CHARGING)   //rate charging or acknowledged then check if rate of charge change signifies charging completed
+    else if (_chargeState == C_RATE_CHARGING)                                           //rate charging then check if rate of charge change signifies charging completed V130
     {
         if (_slope < 0.0) _slope *=-1.0;                                                //abs not working
         if (_slope < param.minChargeRate)                                               //rate of change in charging amps is almost zero = charging finished
@@ -3962,12 +4013,12 @@ int determineChargeState(int _chargeState, float _slope, float _amps, int _devic
         }
         else
         {
-            charge_state = C_RATE_CHARGING_PLUS;                                        //continue in rate charging plus state by returning this
+            charge_state = C_RATE_CHARGING; /*C_RATE_CHARGING_PLUS;*/                   //continue in rate charging state by returning this V130
         }
     }
     else if (startChargeRateMonitor(_amps, _devices, _chargeState))                     //put in a function - switch to charge rate of change monitoring
     {
-        if (_chargeState == C_CHARGING)                                                 //to avoid continually setting dataPoints = 0 and ptrNow = 0
+        if (_chargeState == C_CHARGING_FULL)                                            //to avoid continually setting dataPoints = 0 and ptrNow = 0 V130
         {
             dataPoints = 0;                                                             //initialise the pointer to the amps array and number of points
             ptrNow = 0;
@@ -3993,11 +4044,7 @@ bool startChargeRateMonitor(float _amps, int _devices, int _chargeState)
     if (_devices > 0 && _amps < thresholdCurrent)             //only if there are devices connected and total current less than threshold
     {
         Log.info("startChargeRateMonitor CAmps %f Cdevices %i CState %i Thresh %f", _amps, _devices, _chargeState, thresholdCurrent);
-        if (_chargeState == C_CHARGING)
-        {
-            result = true;
-        }
-        else if (_chargeState == C_RATE_CHARGING || _chargeState == C_RATE_CHARGING_PLUS) //already in rate monitoring charging so continue
+        if (_chargeState == C_CHARGING_FULL || _chargeState == C_RATE_CHARGING)
         {
             result = true;
         }
@@ -4249,11 +4296,13 @@ void ACRelaysOn(int context)
         case X_USBC:
             writer.beginObject();
             writer.name("date").value((const char*)getCreatedTime());
-            writer.name("CX").value("Resume After Suspend");
+            if (context == X_ONTIL) writer.name("CX").value("Resume Warm-up Smart AC"); //V130
+            else                    writer.name("CX").value("Resume After Suspend"); //V130
             writer.name("R").value(runStateInt);
             writer.name("Z").value(powerStateInt);
             writer.name("LA").value((double) powerdata.ampsrms,3);
             writer.name("LV").value((double) powerdata.voltsrms,3);         //V113
+            if (context == X_ONTIL) writer.name("KL").value(chargeState);   //V130
             writer.name("TMP").value((double)maxtemp,1);
             writer.endObject();
         break;
@@ -4275,7 +4324,7 @@ void ACRelaysOn(int context)
         default:
             writer.beginObject();
             writer.name("date").value((const char*)getCreatedTime());
-            if (context == R_ONTIL) writer.name("CX").value("Normal Start AC");
+            if (context == R_ONTIL) writer.name("CX").value("Normal Warm-up Smart AC"); //V130
             else if (context == R_USBC) writer.name("CX").value("Normal Start USB-C");
             else writer.name("CX").value("Normal Start");
             writer.name("R").value(runStateInt);
@@ -4417,11 +4466,12 @@ void ACRelaysOff(int context)
         case M_USBC:
             writer.beginObject();
             writer.name("date").value((const char*)getCreatedTime());
-            writer.name("CX").value("Stopped at Max Charge Time");
+            writer.name("CX").value("Stopped at Maximum Time Charging");
             writer.name("R").value(W_STANDBY);
             writer.name("Z").value(W_MAINS_ON);
             writer.name("LA").value(0.0,3);
             writer.name("LV").value((double) powerdata.voltsrms,3);         //V121
+            writer.name("KL").value(chargeState);   //V130
             writer.name("K").value(param.maxTimeOn);
             writer.name("TMP").value((double)maxtemp,1);
             #if LVSUNCHARGER
@@ -4538,14 +4588,15 @@ void ACRelaysOff(int context)
         case W_USBC:
             writer.beginObject();
             writer.name("date").value((const char*)getCreatedTime());
-            writer.name("CX").value("Normal");
+            if (context == R_ONTIL) writer.name("CX").value("Extra time ended");
+            else writer.name("CX").value("Normal end");
             writer.name("R").value(W_STANDBY);
             writer.name("Z").value(W_MAINS_ON);
             writer.name("LA").value(/*(double) powerdata.ampsrms*/0.0,3);   //V121
             writer.name("LV").value((double) powerdata.voltsrms,3);         //V121
             writer.name("K").value(kvalue);
             writer.name("TMP").value((double)maxtemp,1);
-            writer.name("KL").value(chargeState);
+            writer.name("KL").value(C_CHARGING_ENDED); //V130
             #if LVSUNCHARGER
             if (hubdata.channelsIn > 0)                     //V091
             {
@@ -4772,9 +4823,9 @@ void checkDeviceUpdate()
 
     if (isSleepWake) {isSleepWake = false; deviceupdate = 0;}               //force immediate update after wake from sleep V072
 
-    if (isChargingStarted) {isChargingStarted = false; deviceupdate = millis();}   //reset update after charging started V108
+    if (isChargingStarted) {isChargingStarted = false; deviceupdate = millis();}   //reset update after charging initiated to suppress sending V108
 
-    if (isUSBCjustStarted) {isUSBCjustStarted = false; deviceupdate = 0;}   //force immediate update after USB-C just started V107
+    if (isChargingJustStarted) {isChargingJustStarted = false; deviceupdate = 0;}   //force immediate update after charging just started V107
 
     if (deviceupdate == 0 || (millis()-deviceupdate) >= DUPCHK)             //Slow down DEUP send rate when in standby or Auto_off but first time immediately
     {
