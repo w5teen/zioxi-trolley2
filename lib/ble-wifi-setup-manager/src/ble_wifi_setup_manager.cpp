@@ -37,6 +37,8 @@
 #include "ble_wifi_setup_manager.h"
 #include "EthernetWiFi.h"
 
+#define GET_WAP_CHANGE false //V132 true /V136 false
+
 Logger BLEWiFiSetupManagerLogger("app.BLEWiFiSetupManager");
 
 BLEWiFiSetupManager *BLEWiFiSetupManager::_instance = nullptr;
@@ -301,6 +303,44 @@ void BLEWiFiSetupManager::parse_message()
             // Get WiFi Access Point (WAP) information
             else if (strcmp((const char *)iter.value().toString(), "get_wap") == 0)
             {
+                #if GET_WAP_CHANGE
+                char tmp_buf[150];
+                int activenetwork = EthernetWiFi::instance().getActiveInterface();
+
+                if (activenetwork == (int) EthernetWiFi::ActiveInterface::WIFI) //must have credentials and WiFi ready
+                {
+                    int len = sprintf(tmp_buf, "{\"msg_t\":\"network\", \"net\":\"%s\", \"creds\":\"%s\", \"ssid\":\"%s\", \"cloud\":\"%s\"}", "WiFi", "true", WiFi.SSID(), Particle.connected() ? "true" : "false"); //V102/V132
+                    rxCharacteristic->setValue((uint8_t*)tmp_buf, len);
+                    BLEWiFiSetupManagerLogger.info("Connected to WAP: %s", tmp_buf);
+                }
+                else if (activenetwork == (int) EthernetWiFi::ActiveInterface::ETHERNET)
+                {
+                    BLEWiFiSetupManagerLogger.info("Using Ethernet interface");
+                    int len = sprintf(tmp_buf, "{\"msg_t\":\"network\", \"net\":\"%s\", \"creds\":\"%s\", \"ssid\":\"%s\", \"cloud\":\"%s\"}", "Ethernet", "false", "", Particle.connected() ? "true" : "false");
+                    rxCharacteristic->setValue((uint8_t*)tmp_buf, len);
+                }
+                else if (activenetwork == (int) EthernetWiFi::ActiveInterface::NONE)
+                {
+                    BLEWiFiSetupManagerLogger.info("No network interface active");
+                    if (WiFi.hasCredentials())
+                    {
+                        BLEWiFiSetupManagerLogger.info("WiFi Credentials, Not Connected");
+                        int len = sprintf(tmp_buf, "{\"msg_t\":\"network\", \"net\":\"%s\", \"creds\":\"%s\", \"ssid\":\"%s\", \"cloud\":\"%s\"}", "None", "true", "", "false"); //WiFi.SSID returns empty string if not WiFi ready
+                        rxCharacteristic->setValue((uint8_t*)tmp_buf, len);
+                    }
+                    else
+                    {
+                        BLEWiFiSetupManagerLogger.info("No WiFi Credentials");
+                        int len = sprintf(tmp_buf, "{\"msg_t\":\"network\", \"net\":\"%s\", \"creds\":\"%s\", \"ssid\":\"%s\", \"cloud\":\"%s\"}", "None", "false", "", "false");
+                        rxCharacteristic->setValue((uint8_t*)tmp_buf, len);
+                    }
+                }
+                else //OFF
+                {
+                    BLEWiFiSetupManagerLogger.info("Local mode network off");
+                    status_message("Local mode operation");
+                }
+                #else                // Old code prior to V132
                 if (WiFi.hasCredentials())
                 {
                     if (WiFi.ready())
@@ -322,6 +362,7 @@ void BLEWiFiSetupManager::parse_message()
                     BLEWiFiSetupManagerLogger.info("No WiFi Credentials");
                     status_message("No WiFi Credentials");
                 }
+                #endif //GET_WAP_CHANGE
             }
             // Get the operation mode [Local or Connected]
             else if (strcmp((const char *)iter.value().toString(), "get_mode") == 0)

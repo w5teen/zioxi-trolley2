@@ -134,7 +134,12 @@
  * 129      14-Oct-25   Build and test on Rev12 board - initial batch with serial connected wait turned off
  * 130      15-Oct-25   Build and test on Rev12 board - zioxi-8766, revised events and variable for smart charging status
  * 131      16-Oct-25   Build and test on Rev12 board - zioxi-8794, suppress DRUP event between web command and ACRelaysOn event and ensure first DRUP 40 seconds after ACRelaysOn
- */ 
+ * 132      18-Oct-25   Build and test on Rev12 board - zioxi-8809, revise reply to 'get_wap' BLE call with compile switch in ble_wifi_setup_manager.cpp
+ * 133      18-Oct-25   Build and test on Rev12 board - zioxi-8814, DPO var in configuration file not being read
+ * 134      19-Oct-25   Build and test on Rev12 board - zioxi-8792, increase minChargeRate resolution to 6dp to avoid it defaulting to scientific notation
+ * 135      19-Oct-25   Build and test on Rev12 board - zioxi-8603, configuration and eeprom data recovery after param struct change or flash restart
+ * 136      20-Oct-25   Build and test on Rev12 board - zioxi-8809, revert change with compile switch in ble_wifi_setup_manager.cpp
+ */
 
 // P2-PDU-base *************************************
 #define EXT_TEMP_SENSOR false
@@ -142,7 +147,7 @@
 #define CMD_BUFFER false
 #define LVSUNCHARGER true
 #define LOCAL_TIME_RK false                 //V082
-#define SERIAL_WAIT false                   //V083
+#define SERIAL_WAIT false                   //V083/V136 false
 #define RESET_AUTO_SMART_MONITORING false   //V110
 #define REV12_BOARD true                    //V125
 
@@ -171,10 +176,10 @@
 SYSTEM_MODE(SEMI_AUTOMATIC);            //let firmware manage the connection to the Particle Cloud
 
 const char* const firmware         =   "6.3.4";
-const char* const softwarebuild    =   "131 16-10-25";
+const char* const softwarebuild    =   "136 20-10-25";
 const char* const hardwarebuild    =   "Rev12";
 
-PRODUCT_VERSION(131);
+PRODUCT_VERSION(136);
 
 // instantiations
 MCP9800 tmpSensor;                      //always instantiate onboard MCP9800 sensor
@@ -444,9 +449,7 @@ const char* const eventwifiupdate =    "DEUP";
 #define PRODLEN 30                          //Product Type, Name, Code length
 #define MAXLEN 7                            //Item name length reduced to 7 to see if works better with BLE advertising V059/V090
 #define ARRAYSIZE 42                        //schedule byte array size
-#define MAXTEMPC 45                         //maximum temperature oC to trigger over temperature warning default value
-#define DEFAULTIMER 180                     //timerperiod default value 
-#define DEFAULTMAXON 300                    //maximum On time default value
+#define NUM_OUTLETS 4                       //number of outlets/relays V135
 
 #define SSDELAY 2                           //sequenced start delay - 2 seconds
 #define CHARGEONOFF  'C'                    //schedule type is 'Charging On/Off'
@@ -527,49 +530,65 @@ int remoteParam(const char * command);
 int remoteCharge(const char * command);     //V048
 void onViewRunState();
 
+#define MXT_DEFAULT 45                      //maximum temperature oC to trigger over temperature warning default value
+#define TP_DEFAULT 180                      //timerperiod default value 
+#define MXO_DEFAULT 300                     //maximum Smart charge time default value V135
+#define MNC_DEFAULT 0.023f                  //default minCurrent value V135
+#define TZ_DEFAULT 0.0f                     //default time zone value V135
+#define DRS_DEFAULT 0                       //default door sensors value V135
+#define TMP_DEFAULT 0                       //default temp sensors value V135
+#define MMT_DEFAULT 10                      //default max monitoring time value V135
+#define MNR_DEFAULT 0.0005f                 //default minChargeRate value V135
+#define EXT_DEFAULT 1                       //default extra charging time value V135
+#define PMF_DEFAULT 0.9456f                 //default power meter factor value V135
+#define WUM_DEFAULT 2                       //default warmup minutes value V135
+#define POS_DEFAULT POS_CONT_ON             //default power on state value V135
+#define N_DEFAULT {8,8,8,8}               //default number of spaces per outlet V135
+#define NO_HUB_BOARD 0                      //hub board not present V135
+
 struct deviceSettings
 {
-    int     magicNumber = 0x99DEA128;   //must be changed if struct changes or default values set to show upgrade of struct
-    byte    resumeFlag = 0;             //=28 if set before hard reset or 0 if not or 5 firmware flashed V097
-    int     timerPeriod = DEFAULTIMER;  //timer period in minutes (to start)
-    bool    isDst = false;              //daylight saving time
-    bool    isAutoDst = true;           //automatically set/reset daylight saving
-    double  timeZone = 0.0;             //time zone +/- from UTC
-    char    serialNum[SERLEN+1];        //serial number - SN
-    char    productCode[PRODLEN];       //product code - PRC
-    char    itemName[MAXLEN+1];         //item (given) name - NAM
-    uint8_t macA[6];                    //mac address for wifi device
-    uint8_t ethA[6];                    //mac address for ethernet adaptor
-    uint8_t bleA[6];                    //mac address for bluetooth
-    uint8_t schedule[ARRAYSIZE];        //schedule control data
-    char    scheduleType = NONESCHEDULE;//defines whether 'OuC-Start' = 'O' or 'Charge On/Off' = 'C'  or 'None' = 'N'
-    int     valid2day = 1;              //day of month
-    int     valid2month = 1;            //month
-    int     valid2year = 2024;          //year
-    float   minCurrent;                 //level of charging current per device below which rate of charge monitoring used - MNC
-    int     resumeState = 0;            //watchdog resume state after reset
-    int     resumeMinutes = -1;         //watchdog timing resume minutes
-    int     resumeTrace = 0;            //added in case using resumeMinutes compromising restart after being in timed, etc.
-    int     resumeCause = 0;            //added to ensure the cause of the resume condition is known to apply the right recovery
-    int     maxTimeOn = DEFAULTMAXON;   //maximum time allowed for On - MXO
-    int     numSpaces[4] = {0};         //number of bays or charging spaces - NUM V118
-    int     numDevices = 0;             //total number of devices in trolley/cabinet sum of DPO[] V118
-    int     doorSensors = 0;            //number of door sensors - DRS
-    int     tempSensors = 0;            //number of temperature sensors (default onboard only) - TMP
-    int     extraChargingTime = 1;      //extra charging time after charging done - EXT V118
-    int     maxTemp = MAXTEMPC;         //maximum temperature before warning in oC - MXT
-    bool    isAuto = false;             //to ensure auto is re-engaged after a restart or charging cycle  this can be Auto On/Off or Auto On_Until_Charged 
-    int     devicesPerOutlet[4] = {0};  //entered devices per outlet - DPO V118    
-    bool    isOUCMonitoring = false;    //OUC monitoring
-    float   minChargeRate;              //minimum charge rate - MNR
-    int     warmupMins = 2;             //warmup period in minutes (default = 2)
-    int     maxMonitoringTime = 10;     //maximum monitoring time in minutes - MMT V118
-    int     powerOnState = POS_CONT_ON; //power on state - default continuous on - POS
-    uint8_t hubBoard = 0;               //hub board present - 'UC' in product code V076
-    float   powerMeterFactor = 0.9456;  //power meter factor to multiply raw output from ACS37800 in amps to get actual current in amps
-    bool    isLocalMode = false;        //local mode - not connected to cloud default is connected V128
-    uint8_t padding[3] = {0};           //fill to 4 byte multiple boundary
-    int     checkSum  = 0;              //checksum value is always the last item
+    uint32_t magicNumber = 0x00DEA136;      //must be changed if struct changes or default values set to show upgrade of struct 0x99 means struct change
+    byte    resumeFlag = 0;                 //=28 if set before hard reset or 0 if not or 5 firmware flashed V097
+    int     timerPeriod = TP_DEFAULT;       //timer period in minutes (to start)
+    bool    isDst = false;                  //daylight saving time
+    bool    isAutoDst = true;               //automatically set/reset daylight saving
+    double  timeZone = TZ_DEFAULT;          //time zone +/- from UTC
+    char    serialNum[SERLEN+1];            //serial number - SN
+    char    productCode[PRODLEN];           //product code - PRC
+    char    itemName[MAXLEN+1];             //item (given) name - NAM
+    uint8_t macA[6];                        //mac address for wifi device
+    uint8_t ethA[6];                        //mac address for ethernet adaptor
+    uint8_t bleA[6];                        //mac address for bluetooth
+    uint8_t schedule[ARRAYSIZE];            //schedule control data
+    char    scheduleType = NONESCHEDULE;    //defines whether 'OuC-Start' = 'O' or 'Charge On/Off' = 'C'  or 'None' = 'N'
+    int     valid2day = 1;                  //day of month 1st
+    int     valid2month = 1;                //month January
+    int     valid2year = 2024;              //year 2024
+    float   minCurrent = MNC_DEFAULT;       //level of charging current per device below which rate of charge monitoring used - MNC
+    int     resumeState = 0;                //watchdog resume state after reset
+    int     resumeMinutes = -1;             //watchdog timing resume minutes
+    int     resumeTrace = 0;                //added in case using resumeMinutes compromising restart after being in timed, etc.
+    int     resumeCause = 0;                //added to ensure the cause of the resume condition is known to apply the right recovery
+    int     maxTimeOn = MXO_DEFAULT;        //maximum time allowed for On - MXO
+    int     numSpaces[4] = N_DEFAULT;       //number of bays or charging spaces - NUM V118
+    int     numDevices = 0;                 //total number of devices in trolley/cabinet sum of NUM[] or DPO[] V118
+    int     doorSensors = DRS_DEFAULT;      //number of door sensors - DRS
+    int     tempSensors = TMP_DEFAULT;      //number of temperature sensors (default onboard only) - TMP
+    int     extraChargingTime = EXT_DEFAULT;//extra charging time after charging done - EXT V118
+    int     maxTemp = MXT_DEFAULT;          //maximum temperature before warning in oC - MXT
+    bool    isAuto = false;                 //to ensure auto is re-engaged after a restart or charging cycle  this can be Auto On/Off or Auto On_Until_Charged 
+    int     devicesPerOutlet[4] = N_DEFAULT;//entered devices per outlet - DPO V118    
+    bool    isOUCMonitoring = false;        //OUC monitoring
+    float   minChargeRate = MNR_DEFAULT;    //minimum charge rate - MNR
+    int     warmupMins = WUM_DEFAULT;       //warmup period in minutes (default = 2)
+    int     maxMonitoringTime = MMT_DEFAULT;//maximum monitoring time in minutes - MMT V118
+    int     powerOnState = POS_DEFAULT;     //power on state - default continuous on - POS
+    uint8_t hubBoard = NO_HUB_BOARD;        //hub board present - 'UC' in product code V076
+    float   powerMeterFactor = PMF_DEFAULT; //power meter factor to multiply raw output from ACS37800 in amps to get actual current in amps
+    bool    isLocalMode = false;            //local mode - not connected to cloud default is connected V128
+    uint8_t padding[3] = {0};               //fill to 4 byte multiple boundary
+    int     checkSum  = 0;                  //checksum value is always the last item
 };
 
 deviceSettings param;                   //create an instance of the deviceSettings struct called param
@@ -606,6 +625,8 @@ int getConfigurationStatus();
 void configurationAvailableCheck();
 void restoreConfigurationItems();
 int powerOnStateSelection();
+void resetParametersToDefault();        //V135
+void resetUpgradedParameters();         //V135
 
 int timerMins = 0;                      //for timed on
 int chargeMins = 0;                     //for on until charged
@@ -708,7 +729,6 @@ void webGoToChargedController();
 void webGoToOnController();
 void webGoToOUCAutoController();
 void webGoToRestartController();
-void webGoToHardRestartController();
 void webGoToStandbyController();
 void webOUCAExitController();
 void webGoToExitController();
@@ -749,7 +769,7 @@ void waitForQueueToEmpty();
 void helperDelayDRUP();       //V116
 void helperCheckFirstDRUP();  //V116
 void checkForWiFiHealth();
-void initialDESTevent();
+void sendDESTevent();         //V135
 char* getCreatedTime();
 
 Ledger cloudconfigurationtodevice;  // Cloud to Device, device-specific configuration
@@ -816,8 +836,8 @@ void restoreRestartDataFromRam();
 
 SerialLogHandler logHandler(LOG_LEVEL_WARN, { // Logging level for non-application messages
     { "app", LOG_LEVEL_INFO }, // Default logging level for all application messages
-    { "app.mcp7940N_RTC", LOG_LEVEL_TRACE }, // Logging level for MCP7940N RTC messages
-    { "app.BLEWiFiSetupManager", LOG_LEVEL_TRACE } // Logging level for networking messages
+    /*{ "app.mcp7940N_RTC", LOG_LEVEL_TRACE }, // Logging level for MCP7940N RTC messages */
+    { "app.BLEWiFiSetupManager", LOG_LEVEL_ALL } // Logging level for networking messages
 });
 
 void outOfMemoryHandler(system_event_t event, int param);
@@ -1189,7 +1209,7 @@ void loop()
 void startupController()
 {
     clockTimeUpdate(true);      // force check if date/time needs to be updated for DST V093
-    initialDESTevent();
+    sendDESTevent();
 
     param.resumeFlag = 0;       // V097
     putParameters();
@@ -1197,8 +1217,8 @@ void startupController()
     runState = powerOnStateSelection(); //V078 - select the power on state based on the parameter setting
 }
 
-// helper to format and send startup event
-void initialDESTevent()
+// helper to format and send DEST event at startup and on configuration change
+void sendDESTevent()
 {
     char temp[2] = {0};
     temp[0] = param.scheduleType;
@@ -1284,7 +1304,7 @@ void initialDESTevent()
     writer.endArray();
     writer.name("MMT").value(param.maxMonitoringTime);  //V118
     writer.name("EXT").value(param.extraChargingTime);  //V118
-    writer.name("MNR").value((double) param.minChargeRate); //V118
+    writer.name("MNR").value((double) param.minChargeRate, 6); //V118/V134
     writer.name("MNC").value((double) param.minCurrent);    //V118
     writer.name("WUP").value(param.warmupMins);   //V118
     //writer.name("MD").value(param.numDevices);  //V122
@@ -3571,12 +3591,9 @@ void webOUCAExitController()
 // exit to   : runStart = D_RESTART
 void webGoToFactoryResetController()
 {
-    param.resumeFlag = HARD_RESET_CMD; 
-    memset(param.bleA, 0, sizeof(param.bleA)); 
-    memset(param.macA, 0, sizeof(param.macA));
-    memset(param.ethA, 0, sizeof(param.ethA));
-
+    resetParametersToDefault();            //reset parameters to defaults V135
     bool result = performConfiguration(); // perform the factory reset V062
+    param.resumeFlag = HARD_RESET_CMD; 
     param.resumeCause = RESTART_HARD_RESET; //V076
     if (result) putParameters();
     else        Log.error("Factory reset failed");
@@ -5693,6 +5710,7 @@ void checkForConfiguration()
                     {
                         setConfigurationDone(ver);
                         putParameters();
+                        sendDESTevent();                 // send initial DEST event based on new configuration V133
                     }
                     else
                     {
@@ -5716,7 +5734,7 @@ bool performConfiguration()
     bool success = false; // all configuration done correctly
     //Log.info("performConfiguration");
 
-    Variant snVariant, prcVariant, namVariant, mxoVariant, mncVariant, extVariant,/*mxcVariant,*/ mxtVariant, mnrVariant, /*mpcVariant,*//*wumVariant,*/ mmtVariant, /*hrfVariant,*/ numVariant, tmpVariant, drsVariant, posVariant, pmfVariant, dopVariant, s1Variant, s2Variant, s3Variant, s4Variant;
+    Variant snVariant, prcVariant, namVariant, mxoVariant, mncVariant, extVariant, mxtVariant, mnrVariant, mmtVariant, numVariant, tmpVariant, drsVariant, posVariant, pmfVariant, dpoVariant;
 
     for (int i = 0; i < 6; i++) {param.macA[i] = 0x00;} // clear mac address
 
@@ -5809,20 +5827,6 @@ bool performConfiguration()
         }
     }
 
-    /*if (getValue("MXC", mxcVariant)) //V118
-    {
-        if (!mxcVariant.isNull())
-        {
-            param.maxCurrent = (float) mxcVariant.toDouble();
-            success = success && true;
-        }
-        else
-        {
-            success = false;
-            Log.info("No maximum current found");
-        }
-    }*/
-
     if (getValue("EXT", extVariant))  //V118
     {
         if (!extVariant.isNull())
@@ -5851,49 +5855,7 @@ bool performConfiguration()
         }
     }
 
-    /*if (getValue("MPC", mpcVariant)) //V118
-    {
-        if (!mpcVariant.isNull())
-        {
-            param.minPluggedCurrent = (float) mpcVariant.toDouble();
-            success = success && true;
-        }
-        else
-        {
-            success = false;
-            Log.info("No minimum plugged current found");
-        }
-    }*/
-
-    /*if (getValue("HRF", hrfVariant)) //V118
-    {
-        if (!hrfVariant.isNull())
-        {
-            param.halfRateFactor = (float) hrfVariant.toDouble();
-            success = success && true;
-        }
-        else
-        {
-            success = false;
-            Log.info("No half rate factor found");
-        }
-    }*/
-
-    /*if (getValue("WUM", wumVariant)) //V118
-    {
-        if (!wumVariant.isNull())
-        {
-            param.warmupMins = wumVariant.toInt();
-            success = success && true;
-        }
-        else
-        {
-            success = false;
-            Log.info("No warm up minutes found");
-        }
-    }*/
-
-    if (getValue("MMT", mmtVariant))    //V118
+    if (getValue("MMT", mmtVariant))  //V118
     {
         if (!mmtVariant.isNull())
         {
@@ -5916,7 +5878,6 @@ bool performConfiguration()
                 param.numSpaces[index] = numVariant.asArray().at(index).toInt(); // copy each array element to param.numSpaces which is 0 based
             }
             success = success && true;
-            Log.info("param.numSpaces = %i,%i,%i,%i", param.numSpaces[0], param.numSpaces[1], param.numSpaces[2], param.numSpaces[3]);
             param.numDevices = numberOfAdaptors();          //recalculate total number of adaptors V119
         }
         else
@@ -5931,7 +5892,6 @@ bool performConfiguration()
         if (!tmpVariant.isNull())
         {
             param.tempSensors = tmpVariant.toInt();
-            Log.info("param.tempSensors = %i", param.tempSensors);
             success = success && true;
         }
         else
@@ -5955,6 +5915,24 @@ bool performConfiguration()
         }
     }
 
+    if (getValue("DPO", dpoVariant))  //V133
+    {
+        if (!dpoVariant.isNull())
+        {
+            for (int index = 0; index < dpoVariant.asArray().size(); index++) // array is 0 based
+            {
+                param.devicesPerOutlet[index] = dpoVariant.asArray().at(index).toInt(); // copy each array element to param.devicesPerOutlet which is 0 based
+            }
+            success = success && true;
+            param.numDevices = numberOfAdaptors();         //recalculate total number of adaptors V119
+        }
+        else
+        {
+            success = false;
+            Log.info("No devices per outlet found");
+        }
+    }
+    
     if (getValue("POS", posVariant))
     {
         if (!posVariant.isNull())
@@ -5989,157 +5967,281 @@ bool performConfiguration()
 //function to restore parameters from EEPROM in setup() V096
 void restoreParameters()
 {
-    int eepromMagicNumber;
+    uint32_t eepromMagicNumber;
     EEPROM.get(PARAM_ADDR, eepromMagicNumber);
-    Log.info("EEPROM number %08X PARAM number %08X", eepromMagicNumber, param.magicNumber);
-    if (eepromMagicNumber == param.magicNumber)     //magic number is the same (no struct change)
+    Log.info("EEPROM number %08lX PARAM number %08lX", eepromMagicNumber, param.magicNumber);
+
+    if (eepromMagicNumber == param.magicNumber)         //magic number is the same (no struct or value change)
     {
-        EEPROM.get(PARAM_ADDR, param);              //read whole struct from eeprom into RAM
-        //consider check checksum is correct against calculated checksum or use getParameters()?
-        ItemName = String((const char*) param.itemName); //this appears to be failing to copy occasionally V096
-        SerialNum = String((const char*) param.serialNum);
-        product_code = String((const char*) param.productCode);
-        Log.info("restoreParameters EEPROM read OK %s %s %s", param.serialNum, param.productCode, param.itemName);
+        Log.info("restoreParameters EEPROM Magic same");
+        EEPROM.get(PARAM_ADDR, param);                  //read whole struct from eeprom into RAM
     }
-    else                                            //if changed then default values will have been defined within struct and putParameters() will write to EEPROM at the end of setup() unless this is an upgrade situation
+    else
     {
-        //checkForConfiguration();
+        Log.info("restoreParameters EEPROM Magic different");
         restoreConfigurationItems();
     }
+
+    ItemName = String((const char*) param.itemName);
+    SerialNum = String((const char*) param.serialNum);
+    product_code = String((const char*) param.productCode);
+    Log.info("restoreParameters EEPROM read OK %s %s %s", param.serialNum, param.productCode, param.itemName);
 }
 
-// restore the configuration values, serialNum, productCode, itemName, etc. from EEPROM if required due to upgrade of application and change in param structure V096
+// restore the configuration values, serialNum, productCode, itemName, etc. from EEPROM if required due to upgrade of application and change in param structure NOT TESTED THOROUGHLY YET
 void restoreConfigurationItems()
 {
-    /*
-    const int serialNumIndex   = 75;
-    const int productCodeIndex = 147;
-    const int itemNameIndex    = 177;
-    const int config1Index     = 291;   //config2 +2 config3 +4 config4 +8 config5 +12 config6 +21 config7 +23 config8 +73 config9 +76
-    const int config1IndexN    = 582;   //config2 +2 config3 +4 config4 +8 config5 +12 config6 +21 config7 +23 config8 - value 0 config9 - value 0
-    char oldeeprom[610] = {0};
+    const int timerPeriodIndex = 5;
+    const int timeZoneIndex    = 16;
+    const int serialNumIndex   = 24;
+    const int productCodeIndex = 32;
+    const int itemNameIndex    = 62;
+
+    const int minCurrentIndex  = 141;
+    const int maxTimeOnIndex   = 161;
+    const int numSpacesIndex   = 165;
+    const int doorSensorsIndex = 185;
+    const int tempSensorsIndex = 189;
+    const int extraChargingTimeIndex = 193;
+    const int maxTempIndex     = 197;
+    const int devicesPerOutletIndex = 205;
+    const int minChargeRateIndex = 225;
+    const int maxMonitoringTimeIndex = 233;
+    const int powerOnStateIndex= 237;
+    char oldeeprom[300] = {0};
 
     EEPROM.get(PARAM_ADDR, oldeeprom);                                                                      //copy EEPROM into temporary buffer
-    Log.info("restoreConfigurationFileItems Magic number: %02X Old EEPROM: %02X", ((param.magicNumber>>24) & 0xFF), oldeeprom[0]);
-    if (((param.magicNumber>>24) & 0xFF) == 0x99 && (oldeeprom[0] == 0))                                   //the 1st byte of the magic number in the code is 0x99 meaning this is a struct upgrade
+    Log.info("restoreConfigurationFileItems Magic number: %02X ", (uint8_t)((param.magicNumber>>24) & 0xFF));
+
+    if (((param.magicNumber>>24) & 0xFF) == 0x99 )   //the 1st byte of the magic number in the code is 0x99 meaning this is a struct upgrade
     {
-        //for (int i = 73; i < 445; i++) {Serial.printlnf("Index: %i %02X %c", i, oldeeprom[i], oldeeprom[i]>='0'?oldeeprom[i]:' ');}
-        //Serial.println("Restore settings from old structure");
-        strncpy(param.serialNum, &(oldeeprom[serialNumIndex]), sizeof(param.serialNum));                    //copy original serialNum field (in eeprom) to param struct
-        //Serial.printlnf("serialNum  : %s", param.serialNum);
-        strncpy(param.productCode, &(oldeeprom[productCodeIndex]), sizeof(param.productCode));              //copy original productType field (in eeprom) to param struct
-        //Serial.printlnf("productCode: %s", param.productCode);
-        strncpy(param.itemName, &(oldeeprom[itemNameIndex]), sizeof(param.itemName));                       //copy original productType field (in eeprom) to param struct
-        //Serial.printlnf("itemName: %s", param.itemName);
 
-        strncpy(param.config1, &(oldeeprom[config1Index]), sizeof(param.config1));                          //copy original config1 field (in eeprom) to param struct
-        //Serial.printlnf("cfg1  : %s", param.config1);
-        strncpy(param.config2, &(oldeeprom[config1Index+2]), sizeof(param.config2));                        //copy original config2 field (in eeprom) to param struct
-        //Serial.printlnf("cfg2  : %s", param.config2);
-        strncpy(param.config3, &(oldeeprom[config1Index+4]), 2);                                            //copy original config3 field (in eeprom) to param struct
-        Serial.printlnf("config3  : %s", param.config3);
-        strncpy(param.config4, &(oldeeprom[config1Index+6]), 2);                                            //copy original config4 field (in eeprom) to param struct
-        Serial.printlnf("config4  : %s", param.config4);
-        strncpy(param.config5, &(oldeeprom[config1Index+8]), sizeof(param.config5));                        //copy original config5 field (in eeprom) to param struct
-        Serial.printlnf("config5  : %s", param.config5);
-        strncpy(param.config6, &(oldeeprom[config1Index+17]), sizeof(param.config6));                       //copy original config6 field (in eeprom) to param struct
-        Serial.printlnf("config6  : %s", param.config6);
-        strncpy(param.config7, &(oldeeprom[config1Index+19]), 2);                                           //copy original config7 field (in eeprom) to param struct
-        Serial.printlnf("config7  : %s", param.config7);
-        param.config8[0] = '0';
-        param.config8[1] = '0';
-        param.config8[2] = '\0';
-        Serial.printlnf("config8  : %s", param.config8);
-        param.config9[0] = '0';
-        param.config9[1] = '\0';
-        Serial.printlnf("config9  : %s", param.config9);
+        Log.info("Restore settings from old structure");
+        //for (int i = 24; i < 70; i++) {Log.info("Index: %i %02X %c", i, oldeeprom[i], oldeeprom[i]>='0'?oldeeprom[i]:'?');}
 
-        union Converts
+        strncpy(param.serialNum, (const char*) &(oldeeprom[serialNumIndex]), sizeof(param.serialNum));                    //copy original serialNum field (in eeprom) to param struct
+        Log.info("serialNum [SN]: %s", param.serialNum);
+        strncpy(param.productCode, (const char*) &(oldeeprom[productCodeIndex]), sizeof(param.productCode));              //copy original productType field (in eeprom) to param struct
+        Log.info("productCode [PRC]: %s", param.productCode);
+        strncpy(param.itemName, (const char*) &(oldeeprom[itemNameIndex]), sizeof(param.itemName));                       //copy original productType field (in eeprom) to param struct
+        Log.info("itemName [NAM]: %s", param.itemName);
+
+        union Converti
         {
+            char chrs[4];
+            int  reali;
+        };
+        Converti coni;
+
+        /*coni.chrs[3] = oldeeprom[timerPeriodIndex];
+        coni.chrs[2] = oldeeprom[timerPeriodIndex+1];
+        coni.chrs[1] = oldeeprom[timerPeriodIndex+2];
+        coni.chrs[0] = oldeeprom[timerPeriodIndex+3];
+        param.timerPeriod = coni.reali;*/
+        param.timerPeriod = (int) &oldeeprom[timerPeriodIndex];
+        Log.info("timerPeriod: %i", param.timerPeriod);
+
+        /*coni.chrs[3] = oldeeprom[maxTimeOnIndex];
+        coni.chrs[2] = oldeeprom[maxTimeOnIndex+1];
+        coni.chrs[1] = oldeeprom[maxTimeOnIndex+2];
+        coni.chrs[0] = oldeeprom[maxTimeOnIndex+3];
+        param.maxTimeOn = coni.reali;*/
+        param.maxTimeOn = (int) &oldeeprom[maxTimeOnIndex];
+        Log.info("maxTimeOn [MXO]: %i", param.maxTimeOn);
+
+        coni.chrs[3] = oldeeprom[maxTempIndex];
+        coni.chrs[2] = oldeeprom[maxTempIndex+1];
+        coni.chrs[1] = oldeeprom[maxTempIndex+2];
+        coni.chrs[0] = oldeeprom[maxTempIndex+3];
+        param.maxTemp = coni.reali;
+        Log.info("maxTemp [MXT]: %i", param.maxTemp);
+
+        coni.chrs[3] = oldeeprom[doorSensorsIndex];
+        coni.chrs[2] = oldeeprom[doorSensorsIndex+1];
+        coni.chrs[1] = oldeeprom[doorSensorsIndex+2];
+        coni.chrs[0] = oldeeprom[doorSensorsIndex+3];
+        param.doorSensors = coni.reali;
+        Log.info("doorSensors [DRS]: %i", param.doorSensors);
+
+        coni.chrs[3] = oldeeprom[tempSensorsIndex];
+        coni.chrs[2] = oldeeprom[tempSensorsIndex+1];
+        coni.chrs[1] = oldeeprom[tempSensorsIndex+2];
+        coni.chrs[0] = oldeeprom[tempSensorsIndex+3];
+        param.tempSensors = coni.reali;
+        Log.info("tempSensors [TMP]: %i", param.tempSensors);
+
+        coni.chrs[3] = oldeeprom[extraChargingTimeIndex];
+        coni.chrs[2] = oldeeprom[extraChargingTimeIndex+1];
+        coni.chrs[1] = oldeeprom[extraChargingTimeIndex+2];
+        coni.chrs[0] = oldeeprom[extraChargingTimeIndex+3];
+        param.extraChargingTime = coni.reali;
+        Log.info("extraChargingTime [EXT]: %i", param.extraChargingTime);
+
+        coni.chrs[3] = oldeeprom[maxMonitoringTimeIndex];
+        coni.chrs[2] = oldeeprom[maxMonitoringTimeIndex+1];
+        coni.chrs[1] = oldeeprom[maxMonitoringTimeIndex+2];
+        coni.chrs[0] = oldeeprom[maxMonitoringTimeIndex+3];
+        param.maxMonitoringTime = coni.reali;
+        Log.info("maxMonitoringTime [MMT]: %i", param.maxMonitoringTime);
+
+        coni.chrs[3] = oldeeprom[powerOnStateIndex];
+        coni.chrs[2] = oldeeprom[powerOnStateIndex+1];
+        coni.chrs[1] = oldeeprom[powerOnStateIndex+2];
+        coni.chrs[0] = oldeeprom[powerOnStateIndex+3];
+        param.powerOnState = coni.reali;
+        Log.info("powerOnState [POS]: %i", param.powerOnState);
+
+        union Convertn
+        {   
+            char chrs[16];
+            int  realn[4];
+        };
+        Convertn conn;
+
+        conn.chrs[3] = oldeeprom[numSpacesIndex];
+        conn.chrs[2] = oldeeprom[numSpacesIndex+1];
+        conn.chrs[1] = oldeeprom[numSpacesIndex+2];
+        conn.chrs[0] = oldeeprom[numSpacesIndex+3];
+        conn.chrs[7] = oldeeprom[numSpacesIndex+4];
+        conn.chrs[6] = oldeeprom[numSpacesIndex+5];
+        conn.chrs[5] = oldeeprom[numSpacesIndex+6];
+        conn.chrs[4] = oldeeprom[numSpacesIndex+7];
+        conn.chrs[11] = oldeeprom[numSpacesIndex+8];
+        conn.chrs[10] = oldeeprom[numSpacesIndex+9];
+        conn.chrs[9] = oldeeprom[numSpacesIndex+10];
+        conn.chrs[8] = oldeeprom[numSpacesIndex+11];
+        conn.chrs[15] = oldeeprom[numSpacesIndex+12];
+        conn.chrs[14] = oldeeprom[numSpacesIndex+13];
+        conn.chrs[13] = oldeeprom[numSpacesIndex+14];
+        conn.chrs[12] = oldeeprom[numSpacesIndex+15];
+        for (size_t j = 0; j < sizeof(param.numSpaces)/sizeof(param.numSpaces[0]); j++) {param.numSpaces[j] = conn.realn[j];}
+        Log.info("numSpaces [NUM]: %i,%i,%i,%i", param.numSpaces[0], param.numSpaces[1], param.numSpaces[2], param.numSpaces[3]);
+
+        conn.chrs[3] = oldeeprom[devicesPerOutletIndex];
+        conn.chrs[2] = oldeeprom[devicesPerOutletIndex+1];
+        conn.chrs[1] = oldeeprom[devicesPerOutletIndex+2];
+        conn.chrs[0] = oldeeprom[devicesPerOutletIndex+3];
+        conn.chrs[7] = oldeeprom[devicesPerOutletIndex+4];
+        conn.chrs[6] = oldeeprom[devicesPerOutletIndex+5];
+        conn.chrs[5] = oldeeprom[devicesPerOutletIndex+6];
+        conn.chrs[4] = oldeeprom[devicesPerOutletIndex+7];
+        conn.chrs[11] = oldeeprom[devicesPerOutletIndex+8];
+        conn.chrs[10] = oldeeprom[devicesPerOutletIndex+9];
+        conn.chrs[9] = oldeeprom[devicesPerOutletIndex+10];
+        conn.chrs[8] = oldeeprom[devicesPerOutletIndex+11];
+        conn.chrs[15] = oldeeprom[devicesPerOutletIndex+12];
+        conn.chrs[14] = oldeeprom[devicesPerOutletIndex+13];
+        conn.chrs[13] = oldeeprom[devicesPerOutletIndex+14];
+        conn.chrs[12] = oldeeprom[devicesPerOutletIndex+15];
+        for (size_t i = 0; i < sizeof(param.devicesPerOutlet); i++) {conn.chrs[i] = oldeeprom[devicesPerOutletIndex + i];}
+        for (size_t j = 0; j < sizeof(param.devicesPerOutlet)/sizeof(param.devicesPerOutlet[0]); j++) {param.devicesPerOutlet[j] = conn.realn[j];}
+        Log.info("devicesPerOutlet [DPO]: %i,%i,%i,%i", param.devicesPerOutlet[0], param.devicesPerOutlet[1], param.devicesPerOutlet[2], param.devicesPerOutlet[3]);
+        param.numDevices = numberOfAdaptors();                                                      //recalculate total number of adaptors V119
+
+        union Convertd
+        {
+            char chrs[8];
+            double reald;
+        };
+        Convertd cond;
+
+        cond.chrs[7] = oldeeprom[timeZoneIndex];
+        cond.chrs[6] = oldeeprom[timeZoneIndex+1];
+        cond.chrs[5] = oldeeprom[timeZoneIndex+2];
+        cond.chrs[4] = oldeeprom[timeZoneIndex+3];
+        cond.chrs[3] = oldeeprom[timeZoneIndex+4];
+        cond.chrs[2] = oldeeprom[timeZoneIndex+5];
+        cond.chrs[1] = oldeeprom[timeZoneIndex+6];
+        cond.chrs[0] = oldeeprom[timeZoneIndex+7];
+        param.timeZone = cond.reald;
+        Log.info("timezone : %f", param.timeZone);
+
+        union Convertf
+        {   
             char chrs[4];
             float realf;
         };
+        Convertf conf;
 
-        Converts con;
+        conf.chrs[3] = oldeeprom[minCurrentIndex];
+        conf.chrs[2] = oldeeprom[minCurrentIndex+1];
+        conf.chrs[1] = oldeeprom[minCurrentIndex+2];
+        conf.chrs[0] = oldeeprom[minCurrentIndex+3];
+        param.minCurrent = conf.realf;
+        Log.info("minCurrent [MNC]: %f", param.minCurrent);
 
-        strncpy(param.config3, &(oldeeprom[config1Index+4]), 2);                                            //copy original config3 field (in eeprom) to param struct
-        //Serial.printlnf("cfg3  : %s", param.config3);
-        strncpy(param.config4, &(oldeeprom[config1Index+6]), 2);                                            //copy original config4 field (in eeprom) to param struct
-        //Serial.printlnf("cfg4  : %s", param.config4);
-        strncpy(param.config5, &(oldeeprom[config1Index+8]), sizeof(param.config5));                        //copy original config5 field (in eeprom) to param struct
-        //Serial.printlnf("cfg5  : %s", param.config5);
-        strncpy(param.config6, &(oldeeprom[config1Index+17]), sizeof(param.config6));                       //copy original config6 field (in eeprom) to param struct
-        //Serial.printlnf("cfg6  : %s", param.config6);
-        strncpy(param.config7, &(oldeeprom[config1Index+19]), 2);                                           //copy original config7 field (in eeprom) to param struct
-        //Serial.printlnf("cfg7  : %s", param.config7);
-        strncpy(param.config8, &(oldeeprom[config1Index+128]), 3);                                          //copy original config8 field (in eeprom) to param struct
-        //Serial.printlnf("cfg8  : %s", param.config8);
-        strncpy(param.config9, &(oldeeprom[config1Index+131]), 2);                                          //copy original config8 field (in eeprom) to param struct
-        //Serial.printlnf("cfg9  : %s", param.config9);
-
-        con.chrs[0] = oldeeprom[config1Index+136];
-        con.chrs[1] = oldeeprom[config1Index+137];
-        con.chrs[2] = oldeeprom[config1Index+138];
-        con.chrs[3] = oldeeprom[config1Index+139];
-        param.config10 = con.realf;
-        //Serial.printlnf("cfg10 : %f", param.config10);
-        con.chrs[0] = oldeeprom[config1Index+140];
-        con.chrs[1] = oldeeprom[config1Index+141];
-        con.chrs[2] = oldeeprom[config1Index+142];
-        con.chrs[3] = oldeeprom[config1Index+143];
-        param.config11 = con.realf;
-        //Serial.printlnf("cfg11 : %f", param.config11);
-        con.chrs[0] = oldeeprom[config1Index+144];
-        con.chrs[1] = oldeeprom[config1Index+145];
-        con.chrs[2] = oldeeprom[config1Index+146];
-        con.chrs[3] = oldeeprom[config1Index+147];
-        param.config12 = con.realf;
-        //Serial.printlnf("cfg12 : %f", param.config12);
+        conf.chrs[3] = oldeeprom[minChargeRateIndex];
+        conf.chrs[2] = oldeeprom[minChargeRateIndex+1];
+        conf.chrs[1] = oldeeprom[minChargeRateIndex+2];
+        conf.chrs[0] = oldeeprom[minChargeRateIndex+3];
+        param.minChargeRate = conf.realf;
+        Log.info("minChargeRate [MNR]: %f", param.minChargeRate);
 
         putParameters();
     }
-    else if (((param.magicNumber>>24) & 0xFF) != 0x99)                                                     //different but not a struct upgrade - eventually this can be removed for 
+    else                                                //different but not a struct upgrade - eventually this can be removed for 
     {
-        for (int i = 71; i < 204; i++) {Serial.printlnf("Index: %i %02X %c", i, oldeeprom[i], oldeeprom[i]>='0'?oldeeprom[i]:' ');}
-        strncpy(param.serialNum, &(oldeeprom[serialNumIndex-3]), sizeof(param.serialNum));                 //copy original serialNum field (in eeprom) to param struct
-        Serial.printlnf("serNum  : %s", param.serialNum);
-        strncpy(param.productCode, &(oldeeprom[productCodeIndex-3]), sizeof(param.productCode));           //copy original productType field (in eeprom) to param struct
-        Serial.printlnf("prodCode: %s", param.productCode);
-        strncpy(param.itemName, &(oldeeprom[itemNameIndex-3]), sizeof(param.itemName));                    //copy original productType field (in eeprom) to param struct
-        Serial.printlnf("iName: %s", param.itemName);
-        for (int i = 580; i < 610; i++) {Serial.printlnf("Index: %i %02X %c", i, oldeeprom[i], oldeeprom[i]>='0'?oldeeprom[i]:' ');}
-        strncpy(param.config1, &(oldeeprom[config1IndexN]), sizeof(param.config1));                         //copy original config1 field (in eeprom) to param struct
-        Serial.printlnf("cfg1  : %s", param.config1);
-        strncpy(param.config2, &(oldeeprom[config1IndexN+2]), sizeof(param.config2));                       //copy original config2 field (in eeprom) to param struct
-        Serial.printlnf("cfg2  : %s", param.config2);
-        strncpy(param.config3, &(oldeeprom[config1IndexN+4]), sizeof(param.config3));                       //copy original config3 field (in eeprom) to param struct
-        strncpy(param.config4, &(oldeeprom[config1IndexN+8]), sizeof(param.config4));                       //copy original config4 field (in eeprom) to param struct
-        strncpy(param.config6, &(oldeeprom[config1IndexN+21]), sizeof(param.config6));                      //copy original config6 field (in eeprom) to param struct
-        strncpy(param.config7, &(oldeeprom[config1IndexN+23]), sizeof(param.config7));                      //copy original config7 field (in eeprom) to param struct
-        //param.config3[0] = CURRENTENABLED;              //V457
-        //param.config3[1] = 0;
-        Serial.printlnf("cfg3  : %s", param.config3);
-        param.config4[0] = '8';                         //V457
-        param.config4[1] = 0;
-        Serial.printlnf("cfg4  : %s", param.config4);
-        strncpy(param.config5, &(oldeeprom[config1IndexN+12]), sizeof(param.config5));                      //copy original config5 field (in eeprom) to param struct
-        Serial.printlnf("cfg5  : %s", param.config5);
-        param.config6[0] = 'C';                         //V457
-        param.config6[1] = 0;
-        Serial.printlnf("cfg6  : %s", param.config6);
-        param.config7[0] = 'E';
-        param.config7[1] = 0;
-        Serial.printlnf("cfg7  : %s", param.config7);
-        param.config8[0] = '0';
-        param.config8[1] = '0';
-        param.config8[2] = '\0';
-        Serial.printlnf("cfg8  : %s", param.config8);
-        param.config9[0] = '0';
-        param.config9[1] = '\0';
-        Serial.printlnf("cfg9  : %s", param.config9);
+        EEPROM.get(PARAM_ADDR, param);                  //read whole struct from eeprom into RAM
+        resetUpgradedParameters();                      //reset changed parameters to new default values as required
         putParameters();
+        Log.info("No settings restored - structure OK");
     }
-    */
+}
+
+// function to reset parameters to default values V135
+void resetParametersToDefault()
+{
+    Log.info("resetParametersToDefault");
+    param.resumeFlag = 0;                               //=28 if set before hard reset or 0 if not or 5 firmware flashed V097
+    param.timerPeriod = TP_DEFAULT;                     //timer period in minutes (to start)
+    param.isDst = false;                                //daylight saving time
+    param.isAutoDst = true;                             //automatically set/reset daylight saving
+    param.timeZone = TZ_DEFAULT;                        //time zone +/- from UTC
+                                                        //param.serialNum reset from config ledger SN
+                                                        //param.productCode reset from config ledger PRC
+                                                        //param.itemName reset from config ledger NAM
+    memset(param.macA, 0, sizeof(param.macA));          //MAC address cleared
+    memset(param.ethA, 0, sizeof(param.ethA));          //Ethernet MAC address cleared
+    memset(param.bleA, 0, sizeof(param.bleA));          //BLE MAC address cleared
+    memset(param.schedule, 0, sizeof(param.schedule));  //charging schedule cleared
+    param.scheduleType = NONESCHEDULE;                  //defines whether 'OuC-Start' = 'O' or 'Charge On/Off' = 'C'  or 'None' = 'N'
+    param.valid2day = 1;                                //day of month
+    param.valid2month = 1;                              //month
+    param.valid2year = 2024;                            //year
+    param.minCurrent = MNC_DEFAULT;                     //param.minCurrent reset from config ledger MNC
+    param.resumeState = 0;                              //watchdog resume state after reset
+    param.resumeMinutes = -1;                           //watchdog timing resume minutes
+    param.resumeTrace = 0;                              //added in case using resumeMinutes compromising restart after being in timed, etc.
+    param.resumeCause = 0;                              //added to ensure the cause of the resume condition is known to apply the right recovery
+    param.maxTimeOn = MXO_DEFAULT;                      //param.maxTimeOn reset from config ledger MXO
+    for (size_t i = 0; i < NUM_OUTLETS; i++) {param.numSpaces[i] = param.devicesPerOutlet[i] = 8;}
+                                                        //param.numSpaces[4] reset from config ledger NUM
+                                                        //param.devicesPerOutlet reset from config ledger DPO
+    param.numDevices = 0;                               //total number of devices in trolley/cabinet sum of DPO[]
+    param.doorSensors = DRS_DEFAULT;                    //param.doorSensors reset from config ledger DRS
+    param.tempSensors = TMP_DEFAULT;                    //param.tempSensors reset from config ledger TMP
+    param.extraChargingTime = EXT_DEFAULT;              //param.extraChargingTime reset from config ledger EXT
+    param.maxTemp = MXT_DEFAULT;                        //param.maxTemp reset from config ledger MXT
+    param.isAuto = false;                               //to ensure auto is re-engaged after a restart
+    param.doorSensors = DRS_DEFAULT;                    //param.doorSensors reset from config ledger DRS
+    param.tempSensors = TMP_DEFAULT;                    //param.tempSensors reset from config ledger TMP
+    param.extraChargingTime = EXT_DEFAULT;              //param.extraChargingTime reset from config ledger EXT
+    param.maxTemp = MXT_DEFAULT;                        //param.maxTemp reset from config ledger MXT
+    param.isAuto = false;                               //to ensure auto is not re-engaged
+    param.isOUCMonitoring = false;                      //OUC monitoring
+    param.minChargeRate = MNR_DEFAULT;                  //param.minChargeRate reset from config ledger MNR
+    param.warmupMins = WUM_DEFAULT;                     //warmup minutes before starting full rate charging Smart AC
+    param.maxMonitoringTime = MMT_DEFAULT;              //param.maxMonitoringTime reset from config ledger MMT
+    param.powerOnState = POS_DEFAULT;                   //param.powerOnState reset from config ledger POS
+    param.hubBoard = NO_HUB_BOARD;                      //hub board not present
+    param.powerMeterFactor = PMF_DEFAULT;               //param.powerMeterFactor reset from config ledger PMF
+    param.isLocalMode = false;                          //local mode - not connected to cloud default is connected
+}
+
+// function to reset specific parameters changed in firmware upgrade - currently none
+void resetUpgradedParameters()
+{
+    Log.info("resetUpgradedParameters - no changes");
 }
 
 // Helper to calculate the checkSum of parameters from structure param in EEPROM and return true if checks to that stored, false if not refactored
@@ -6179,6 +6281,7 @@ int calcCheckSumParameters()
 void putParameters()
 {
     param.checkSum = calcCheckSumParameters();
+    Log.info("putParameters EEPROM write checkSum=%i", param.checkSum);
     EEPROM.put(PARAM_ADDR, param);
 }
 
@@ -6187,10 +6290,12 @@ void getParameters()
 {
     if (checkSumParameters()) // checkSum matches
     {
+        Log.info("getParameters EEPROM Checksum OK");
         EEPROM.get(PARAM_ADDR, param);
     }
     else
     {
+        Log.info("getParameters EEPROM Checksum ERROR");
         memset(dataStr, 0, sizeof(dataStr));
         JSONBufferWriter writer(dataStr, sizeof(dataStr) - 1);
         writer.beginObject();
